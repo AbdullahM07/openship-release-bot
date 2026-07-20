@@ -79,13 +79,6 @@ jobs:
             .[] | "- " + emoji(.) + " " + .
           ')
 
-          compare_url=""
-          if [ -n "$prev_tag" ]; then
-            compare_url="https://github.com/oblien/openship/compare/${prev_tag}...${tag}"
-          else
-            compare_url="https://github.com/oblien/openship/commits/main"
-          fi
-
           {
             echo "Latest release: **${tag}** ([full changelog](${url}))"
             echo
@@ -99,7 +92,7 @@ jobs:
             echo "npm i -g openship"
             echo '```'
             echo
-            echo "Full commit history: ${compare_url}"
+            echo "Full release notes: ${url}"
           } > /tmp/description.md
 
           echo "new_release=true" >> "$GITHUB_OUTPUT"
@@ -116,11 +109,20 @@ jobs:
         if: steps.release.outputs.new_release == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          # Passed via env, NOT interpolated into the script body — the
+          # changelog contains a ```code block``` (backticks) and commit
+          # messages we don't control. Splicing either straight into a
+          # double-quoted run: string lets bash re-parse those characters
+          # as command substitution instead of treating them as data
+          # (this is exactly what silently ate the npm code block before).
+          # An env var's value is never re-parsed by the shell this way.
+          DESCRIPTION: ${{ steps.release.outputs.description }}
         run: |
           set -euo pipefail
           jq -n \
-            --arg title "📢 Openship Update — ${{ steps.release.outputs.tag }}" \
-            --arg description "${{ steps.release.outputs.description }}" \
+            --arg title "📢 Openship Update — ${RELEASE_TAG}" \
+            --arg description "$DESCRIPTION" \
             '{
               username: "Openship",
               embeds: [{
