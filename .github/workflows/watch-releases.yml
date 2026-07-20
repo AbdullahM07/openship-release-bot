@@ -1,10 +1,11 @@
 name: Watch upstream releases
 
 # Polls oblien/openship's public releases API on a schedule. On a new
-# release, pulls every commit merged since the PREVIOUS release, buckets
-# them by keyword (security/features/fixes/docs/other), and posts a
-# formatted changelog to Discord — same template style as our manual
-# announcements, generated automatically instead of hand-written.
+# release, pulls every commit merged since the PREVIOUS release and
+# posts them as a flat, emoji-prefixed changelog to Discord — same
+# template shape as our manual announcements, generated automatically
+# instead of hand-written. Wording stays as the raw commit message
+# (no AI rewriting); only the emoji per line is guessed from keywords.
 #
 # Lives in its own standalone repo since we don't have admin access on
 # the upstream repo (can't register a webhook there) — reading a public
@@ -55,10 +56,11 @@ jobs:
           echo "New release found: $tag (was: ${last_seen:-none})"
           echo "$tag" > "$state_file"
 
-          # Every commit merged since the previous release, bucketed by
-          # keyword. Merge-commit wrappers ("Merge pull request #N...")
-          # are dropped — the real fix/feat commit they wrap is what
-          # actually describes the change.
+          # Every commit merged since the previous release, in original
+          # order, each prefixed with an emoji guessed from a keyword in
+          # its message. Merge-commit wrappers ("Merge pull request
+          # #N...") are dropped — the real fix/feat commit they wrap is
+          # what actually describes the change.
           if [ -n "$prev_tag" ]; then
             commits_json=$(gh api "repos/oblien/openship/compare/${prev_tag}...${tag}" \
               --jq '[.commits[].commit.message | split("\n")[0] | select(startswith("Merge pull request") | not)]')
@@ -66,25 +68,16 @@ jobs:
             commits_json='[]'
           fi
 
-          grouped=$(echo "$commits_json" | jq '
-            def bucket(msg):
+          items=$(echo "$commits_json" | jq -r '
+            def emoji(msg):
               (msg | ascii_downcase) as $m
-              | if ($m | test("security|vuln|cve")) then "security"
-                elif ($m | test("(^|[^a-z])(fix|bug)([^a-z]|$)")) then "bugs"
-                elif ($m | test("(^|[^a-z])(doc|docs|readme)([^a-z]|$)")) then "docs"
-                elif ($m | test("(^|[^a-z])(add|support|feat|enhance|introduce)([^a-z]|$)")) then "features"
-                else "other" end;
-            reduce .[] as $msg ({security:[],features:[],bugs:[],docs:[],other:[]}; .[bucket($msg)] += [$msg])
+              | if ($m | test("security|vuln|cve")) then "🔒"
+                elif ($m | test("(^|[^a-z])(fix|bug)([^a-z]|$)")) then "🐛"
+                elif ($m | test("(^|[^a-z])(doc|docs|readme)([^a-z]|$)")) then "📄"
+                elif ($m | test("(^|[^a-z])(add|support|feat|enhance|introduce)([^a-z]|$)")) then "✨"
+                else "🔧" end;
+            .[] | "- " + emoji(.) + " " + .
           ')
-
-          section() {
-            local title="$1" key="$2"
-            local items
-            items=$(echo "$grouped" | jq -r --arg k "$key" '.[$k][] | "- " + .')
-            if [ -n "$items" ]; then
-              printf '%s\n%s\n\n' "$title" "$items"
-            fi
-          }
 
           compare_url=""
           if [ -n "$prev_tag" ]; then
@@ -96,13 +89,11 @@ jobs:
           {
             echo "Latest release: **${tag}** ([full changelog](${url}))"
             echo
-            echo "**What's new:**"
+            echo "**What's new recently:**"
+            if [ -n "$items" ]; then
+              echo "$items"
+            fi
             echo
-            section "🔒 **Security**" security
-            section "✨ **New Features**" features
-            section "🐛 **Bug Fixes**" bugs
-            section "📄 **Docs**" docs
-            section "🔧 **Other Changes**" other
             echo "Grab the latest build or update via:"
             echo '```'
             echo "npm i -g openship"
