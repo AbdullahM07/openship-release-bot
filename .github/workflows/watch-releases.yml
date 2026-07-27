@@ -68,7 +68,27 @@ jobs:
             commits_json='[]'
           fi
 
-          items=$(echo "$commits_json" | jq -r '
+          # The fixed parts of the message are built first so the commit
+          # list can be given whatever character budget is left over.
+          # Discord rejects an embed whose description exceeds 4096
+          # characters with a 400, which curl reports as the bare exit
+          # code 22 — v0.3.0 -> v0.4.1 spanned 115 commits (~7000 chars)
+          # and hit exactly that. The ceiling is 3900 rather than 4096 to
+          # leave slack in case Discord counts an astral emoji as two.
+          header=$(printf '%s\n\n%s' \
+            "Latest release: **${tag}** ([full changelog](${url}))" \
+            "**What's new recently:**")
+          footer=$(printf '\n%s\n```\n%s\n```\n\n%s' \
+            "Grab the latest build or update via:" \
+            "npm i -g openship" \
+            "Full release notes: ${url}")
+          budget=$(( 3900 - $(printf '%s%s' "$header" "$footer" | wc -m) ))
+
+          # Newest commits win the budget — "what's new recently" is the
+          # promise, and the compare API returns oldest-first — with the
+          # older remainder collapsed into a count that points at the
+          # full changelog linked in the header.
+          items=$(echo "$commits_json" | jq -r --argjson budget "$budget" '
             def emoji(msg):
               (msg | ascii_downcase) as $m
               | if ($m | test("security|vuln|cve")) then "🔒"
@@ -76,24 +96,37 @@ jobs:
                 elif ($m | test("(^|[^a-z])(doc|docs|readme)([^a-z]|$)")) then "📄"
                 elif ($m | test("(^|[^a-z])(add|support|feat|enhance|introduce)([^a-z]|$)")) then "✨"
                 else "🔧" end;
-            .[] | "- " + emoji(.) + " " + .
+            [.[] | "- " + emoji(.) + " " + .] as $lines
+            # 60 characters are held back for the "…and N earlier
+            # commits" line, so emitting it can never push the
+            # description back over the budget it was measured against.
+            | ($budget - 60) as $room
+            | (reduce ($lines | reverse | .[]) as $line
+                ({kept: [], used: 0, full: false};
+                 if .full then .
+                 elif (.used + ($line | length) + 1) <= $room
+                   then {kept: (.kept + [$line]),
+                         used: (.used + ($line | length) + 1),
+                         full: false}
+                 else (.full = true)
+                 end)).kept as $newest
+            | (($lines | length) - ($newest | length)) as $dropped
+            | (if $dropped > 0
+                 then ["- …and \($dropped) earlier commit\(if $dropped == 1 then "" else "s" end) — see the full changelog"]
+                 else [] end)
+              + ($newest | reverse)
+            | join("\n")
           ')
 
           {
-            echo "Latest release: **${tag}** ([full changelog](${url}))"
-            echo
-            echo "**What's new recently:**"
+            printf '%s\n' "$header"
             if [ -n "$items" ]; then
-              echo "$items"
+              printf '%s\n' "$items"
             fi
-            echo
-            echo "Grab the latest build or update via:"
-            echo '```'
-            echo "npm i -g openship"
-            echo '```'
-            echo
-            echo "Full release notes: ${url}"
+            printf '%s\n' "$footer"
           } > /tmp/description.md
+
+          echo "Description: $(wc -m < /tmp/description.md) chars, $(echo "$commits_json" | jq 'length') commits in range."
 
           echo "new_release=true" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -130,7 +163,12 @@ jobs:
                 description: $description,
                 color: 3447003
               }]
-            }' | curl -sf -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
+            }' | curl -sS --fail-with-body \
+                   -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
+          # --fail-with-body, not -f: both still fail the step on a 4xx,
+          # but -f discards the response body, which is the only place
+          # Discord says WHICH field it rejected. Without it a rejected
+          # payload surfaces as nothing but "exit code 22".
 
       - name: Commit updated marker
         if: steps.release.outputs.new_release == 'true'
